@@ -5,7 +5,8 @@ import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import { MonacoBinding } from "y-monaco";
 import * as monaco from "monaco-editor";
-import { Users, History, Save, ChevronLeft, FileCode, UserPlus } from "lucide-react";
+import { Users, History, Save, ChevronLeft, FileCode, UserPlus, Play, Terminal, Circle } from "lucide-react";
+import { FileTree } from "../components/FileTree";
 
 export default function EditorPage() {
     const { id } = useParams();
@@ -14,12 +15,17 @@ export default function EditorPage() {
     const editorRef = useRef<HTMLDivElement>(null);
     const monacoRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
     const diffEditorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
+
+    // File System State
+    const [fileMap, setFileMap] = useState<Y.Map<any> | null>(null);
+    const [activeFileId, setActiveFileId] = useState<string | null>(null);
+    const activeBindingRef = useRef<MonacoBinding | null>(null);
     const [activeUsers, setActiveUsers] = useState<any[]>([]);
     const [ydocState, setYdocState] = useState<Y.Doc>(new Y.Doc());
 
     // Version History States
     const [showHistory, setShowHistory] = useState(false);
-    const [historyItems, setHistoryItems] = useState<any[]>([]);
+    // const [historyItems, setHistoryItems] = useState<any[]>([]);
     const [selectedHistory, setSelectedHistory] = useState<any>(null);
 
     useEffect(() => {
@@ -47,25 +53,44 @@ export default function EditorPage() {
             setActiveUsers(states.map((s: any) => s.user).filter(Boolean));
         });
 
-        // Initialize Monaco Editor
+        // Handle File Map System
+        const map = ydoc.getMap("filetree");
+        setFileMap(map);
+
+        const checkAndInitFiles = () => {
+            const keysArray = Array.from(map.keys());
+            if (keysArray.length === 0 && provider.wsconnected) {
+                // If completely empty after connecting, initialize root
+                const initId = "root_index_ts";
+                ydoc.transact(() => {
+                    map.set(initId, { name: "index.ts", type: "file", parentId: null });
+                    ydoc.getText(initId).insert(0, "// Welcome to your collaborative workspace\n");
+                });
+                setActiveFileId(initId);
+            } else if (!activeFileId && keysArray.length > 0) {
+                // Try to find the first file to auto-open
+                const firstFile = keysArray.find(k => (map.get(k) as any).type === "file");
+                if (firstFile) setActiveFileId(firstFile);
+            }
+        };
+
+        // Run immediately in case data already synced
+        checkAndInitFiles();
+
+        // And listen for future syncs/changes
+        map.observe(checkAndInitFiles);
+        provider.on("sync", checkAndInitFiles);
+
+        // Initialize Monaco Editor Frame
         if (editorRef.current && !monacoRef.current) {
-            const editor = monaco.editor.create(editorRef.current, {
+            monacoRef.current = monaco.editor.create(editorRef.current, {
                 value: "",
                 language: "typescript",
                 theme: "vs-dark",
                 automaticLayout: true,
-                minimap: { enabled: false }
+                minimap: { enabled: true, renderCharacters: false, scale: 0.75 },
+                padding: { top: 16 }
             });
-            monacoRef.current = editor;
-
-            // Bind Yjs to Monaco
-            const yText = ydoc.getText("monaco");
-            new MonacoBinding(
-                yText,
-                editor.getModel()!,
-                new Set([editor]),
-                provider.awareness
-            );
         }
 
         return () => {
@@ -78,13 +103,50 @@ export default function EditorPage() {
         };
     }, [id, user, token, navigate]);
 
-    // Fetch Version History
+    // Handle File Switching Dynamics
+    useEffect(() => {
+        if (!activeFileId || !monacoRef.current || !ydocState || showHistory) return;
+
+        // Cleanup old binding instantly
+        if (activeBindingRef.current) {
+            activeBindingRef.current.destroy();
+            activeBindingRef.current = null;
+        }
+
+        const editor = monacoRef.current;
+        const yText = ydocState.getText(activeFileId);
+
+        // Map extension to Monaco Language
+        let lang = "typescript";
+        const filename = fileMap?.get(activeFileId)?.name || "";
+        if (filename.endsWith(".css")) lang = "css";
+        if (filename.endsWith(".html")) lang = "html";
+        if (filename.endsWith(".json")) lang = "json";
+
+        // Create fresh model
+        const model = monaco.editor.createModel(yText.toString(), lang);
+        editor.setModel(model);
+
+        // Bind the specific file's CRDT
+        // Note: provider.awareness doesn't work perfectly when switching models rapidly, 
+        // a more robust app would isolate awareness instances per file
+        activeBindingRef.current = new MonacoBinding(
+            yText,
+            model,
+            new Set([editor])
+        );
+
+    }, [activeFileId, ydocState, fileMap, showHistory]);
     const fetchHistory = async () => {
         const res = await fetch(`http://localhost:3001/api/documents/${id}/history`, {
             headers: { Authorization: `Bearer ${token}` }
         });
         if (res.ok) {
-            setHistoryItems(await res.json());
+            const items = await res.json();
+            // Automatically select the latest history item if available
+            if (items.length > 0) {
+                setSelectedHistory(items[0]);
+            }
         }
     };
 
@@ -140,8 +202,12 @@ export default function EditorPage() {
             const uint8 = Uint8Array.from(selectedHistory.snapshot.data);
             const pastDoc = new Y.Doc();
             Y.applyUpdate(pastDoc, uint8);
-            const pastText = pastDoc.getText("monaco").toString();
-            const currentText = ydocState.getText("monaco").toString();
+
+            // Diffing on Workspace level is extremely complex (many files)
+            // For MVP, we extract the currently active file from the snapshot
+            const targetId = activeFileId || "monaco";
+            const pastText = pastDoc.getText(targetId).toString();
+            const currentText = ydocState.getText(targetId).toString();
 
             if (!diffEditorRef.current) {
                 diffEditorRef.current = monaco.editor.createDiffEditor(editorRef.current, {
@@ -158,107 +224,65 @@ export default function EditorPage() {
     }, [selectedHistory, showHistory]);
 
     return (
-        <div className="flex h-screen overflow-hidden bg-[#0a0f1a] text-slate-300 font-sans selection:bg-blue-500/30">
-            {/* Sidebar for Users / History */}
-            <div className="w-72 bg-[#0f1523] border-r border-slate-800/50 flex flex-col shadow-2xl relative z-20">
-                <div className="p-4 border-b border-slate-800/50 flex justify-between items-center bg-gradient-to-r from-[#0f1523] to-[#151c2e]">
-                    <h2 className="font-bold text-slate-200 uppercase tracking-widest text-xs flex items-center gap-2">
-                        {showHistory ? <><History size={14} className="text-purple-400" /> Version History</> : <><Users size={14} className="text-blue-400" /> Collaborators</>}
-                    </h2>
-                </div>
-                <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
-                    {!showHistory ? (
-                        activeUsers.map((u, i) => (
-                            <div key={i} className="flex items-center gap-3 p-2 rounded-lg hover:bg-slate-800/50 transition-colors cursor-default group">
-                                <div className="relative">
-                                    <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-sm shadow-lg ring-2 ring-slate-800 group-hover:ring-slate-700 transition-all" style={{ backgroundColor: u.color }}>
-                                        {u.name.charAt(0).toUpperCase()}
-                                    </div>
-                                    <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 bg-green-500 border-2 border-[#0f1523] rounded-full"></div>
-                                </div>
-                                <span className="text-slate-300 text-sm font-medium truncate group-hover:text-white transition-colors">{u.name}</span>
-                            </div>
-                        ))
-                    ) : (
-                        historyItems.map((item) => (
-                            <div
-                                key={item.id}
-                                onClick={() => setSelectedHistory(item)}
-                                className={`p-3 rounded-xl cursor-pointer border transition-all duration-300 ${selectedHistory?.id === item.id ? 'bg-purple-500/10 border-purple-500/30 shadow-inner' : 'bg-slate-800/20 border-transparent hover:bg-slate-800/50 hover:border-slate-700'}`}
-                            >
-                                <div className="flex items-start gap-3">
-                                    <div className={`p-2 rounded-lg ${selectedHistory?.id === item.id ? 'bg-purple-500/20 text-purple-400' : 'bg-slate-800 text-slate-400'}`}>
-                                        <History size={16} />
-                                    </div>
-                                    <div>
-                                        <p className={`font-semibold text-sm ${selectedHistory?.id === item.id ? 'text-purple-300' : 'text-slate-200'}`}>{item.reason || "Auto Save"}</p>
-                                        <p className="text-xs text-slate-500 mt-1">{new Date(item.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>
-                                    </div>
-                                </div>
-                            </div>
-                        ))
-                    )}
-                </div>
+        <div className="flex h-screen overflow-hidden bg-[#0d121c] text-slate-300 font-sans selection:bg-blue-500/30">
+
+            {/* Left Activity Bar (Icons) */}
+            <div className="w-12 bg-[#0a0f18] border-r border-[#1e293b] flex flex-col items-center py-4 gap-6 z-30">
+                <button onClick={() => navigate("/")} className="text-slate-400 hover:text-white transition-colors"><ChevronLeft size={24} /></button>
+                <button className="text-white relative"><FileCode size={22} /><span className="absolute -left-3 top-1/2 -translate-y-1/2 w-1 h-5 bg-blue-500 rounded-r-full"></span></button>
+                <button className="text-slate-500 hover:text-slate-300 transition-colors"><Users size={22} /></button>
             </div>
 
-            {/* Main Editor */}
-            <div className="flex-1 flex flex-col relative z-10 w-full">
-                <header className="h-14 border-b border-slate-800/80 bg-[#0f1523]/80 backdrop-blur-md flex items-center px-4 justify-between shadow-sm">
-                    <div className="flex items-center gap-4">
-                        <button onClick={() => navigate("/")} className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors group">
-                            <ChevronLeft size={20} className="group-hover:-translate-x-1 transition-transform" />
-                        </button>
-                        <div className="h-6 w-px bg-slate-700/50"></div>
-                        <span className="text-slate-300 font-mono text-sm flex items-center gap-3">
-                            <FileCode size={18} className="text-blue-500" />
-                            <span>Room: <span className="text-slate-400">{id}</span></span>
-                            {showHistory && selectedHistory && (
-                                <>
-                                    <span className="text-slate-600">/</span>
-                                    <span className="text-purple-400 font-semibold flex items-center gap-2">
-                                        <span className="relative flex h-2 w-2">
-                                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75"></span>
-                                            <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-500"></span>
-                                        </span>
-                                        Viewing Diff: {selectedHistory.reason}
-                                    </span>
-                                </>
-                            )}
-                        </span>
+            {/* Main Sidebar (File Tree / History) */}
+            <div className="w-64 bg-[#111622] border-r border-[#1e293b] flex flex-col shadow-2xl relative z-20">
+                {fileMap ? (
+                    <FileTree fileMap={fileMap} activeFileId={activeFileId} onSelectFile={setActiveFileId} ydoc={ydocState} />
+                ) : (
+                    <div className="p-4 text-xs text-slate-500">Connecting to File System...</div>
+                )}
+            </div>
+
+            {/* Main Editor Environment */}
+            <div className="flex-1 flex flex-col relative z-10 w-full min-w-0 bg-[#1e1e1e]">
+
+                {/* Top IDE Header */}
+                <header className="h-10 bg-[#181818] border-b border-[#2d2d2d] flex items-center justify-between px-3 shrink-0">
+                    <div className="flex bg-[#1e1e1e] h-full items-center px-4 min-w-[150px] border-t-2 border-t-blue-500 border-r border-r-[#2d2d2d] border-l border-l-[#2d2d2d] cursor-pointer">
+                        <FileCode size={14} className="text-yellow-400 mr-2" />
+                        <span className="text-sm font-medium text-slate-200 truncate">{fileMap?.get(activeFileId!)?.name || "Initializing..."}</span>
+                        <span className="ml-4 p-1 hover:bg-slate-700 rounded-md text-slate-400"><Circle fill="currentColor" size={8} /></span>
                     </div>
 
-                    <div className="flex gap-3">
-                        {!showHistory && (
-                            <>
-                                <button
-                                    onClick={inviteUser}
-                                    className="flex items-center gap-2 text-sm bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 hover:bg-indigo-600/40 hover:text-indigo-300 px-4 py-2 rounded-lg transition-all shadow-sm active:scale-95"
-                                >
-                                    <UserPlus size={16} />
-                                    Share
-                                </button>
-                                <button
-                                    onClick={saveSnapshot}
-                                    className="flex items-center gap-2 text-sm bg-slate-800/80 border border-slate-700 hover:bg-slate-700 hover:border-slate-600 px-4 py-2 rounded-lg text-slate-200 transition-all shadow-sm active:scale-95"
-                                >
-                                    <Save size={16} className="text-blue-400" />
-                                    Save Version
-                                </button>
-                            </>
-                        )}
-                        <button
-                            onClick={toggleHistory}
-                            className={`flex items-center gap-2 text-sm px-4 py-2 rounded-lg text-white transition-all shadow-md active:scale-95 ${showHistory ? 'bg-slate-700 hover:bg-slate-600 border border-slate-500' : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 border border-blue-500/50 shadow-blue-500/20'}`}
-                        >
-                            <History size={16} className={showHistory ? 'text-slate-300' : 'text-blue-200'} />
-                            {showHistory ? "Exit History" : "Version History"}
-                        </button>
+                    {/* Toolbar Buttons */}
+                    <div className="flex items-center gap-2 pr-2">
+                        <button onClick={inviteUser} className="text-xs flex items-center gap-1.5 px-3 py-1 bg-[#2d2d3d] hover:bg-[#3d3d4d] text-indigo-300 rounded border border-[#4d4d6d] transition-colors"><UserPlus size={14} /> Share</button>
+                        <button onClick={saveSnapshot} className="text-xs flex items-center gap-1.5 px-3 py-1 bg-[#1e1e1e] hover:bg-[#2d2d2d] text-slate-300 rounded border border-[#3d3d3d] transition-colors"><Save size={14} className="text-slate-400" /> Save</button>
+                        <button onClick={toggleHistory} className="text-xs flex items-center gap-1.5 px-3 py-1 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded border border-blue-500/30 transition-colors ml-2"><History size={14} /> Diff</button>
                     </div>
                 </header>
 
                 {/* Editor Container */}
-                <div className="flex-1 w-full relative bg-[#1e1e1e]">
+                <div className="flex-1 w-full relative">
                     <div ref={editorRef} className="absolute inset-0" />
+                </div>
+
+                {/* Bottom Status Panel */}
+                <div className="h-6 bg-blue-600 flex items-center justify-between px-3 text-white text-[11px] shrink-0 font-mono tracking-wide shadow-[0_-2px_10px_rgba(0,0,0,0.5)] z-20">
+                    <div className="flex items-center gap-4">
+                        <span className="flex items-center gap-1.5 hover:bg-white/10 px-1 py-0.5 rounded cursor-pointer transition-colors">
+                            <Play size={10} /> Prettier
+                        </span>
+                        <span className="flex items-center gap-1.5 hover:bg-white/10 px-1 py-0.5 rounded cursor-pointer transition-colors">
+                            <Terminal size={12} /> Live Server: Port 5173
+                        </span>
+                    </div>
+                    <div className="flex items-center gap-4">
+                        <span>UTF-8</span>
+                        <span>{fileMap?.get(activeFileId!)?.name?.split('.').pop()?.toUpperCase() || "TYPESCRIPT"}</span>
+                        <span className="flex items-center gap-1">
+                            {activeUsers.length} <Users size={12} className="opacity-80 mx-1" /> ONLINE
+                        </span>
+                    </div>
                 </div>
             </div>
         </div>
