@@ -28,6 +28,16 @@ export default function EditorPage() {
     // const [historyItems, setHistoryItems] = useState<any[]>([]);
     const [selectedHistory, setSelectedHistory] = useState<any>(null);
 
+    const [promptConfig, setPromptConfig] = useState<{ message: string; isAlert?: boolean; resolve: (val: string | null) => void } | null>(null);
+
+    const promptUser = (message: string): Promise<string | null> => {
+        return new Promise((resolve) => setPromptConfig({ message, resolve }));
+    };
+
+    const alertUser = (message: string) => {
+        return new Promise<void>((resolve) => setPromptConfig({ message, isAlert: true, resolve: () => resolve() }));
+    };
+
     useEffect(() => {
         if (!id || !user || !token) {
             navigate("/");
@@ -166,19 +176,19 @@ export default function EditorPage() {
     };
 
     const saveSnapshot = async () => {
-        const reason = prompt("Enter a name for this version:");
+        const reason = await promptUser("Enter a name for this version:");
         if (!reason) return;
         await fetch(`http://localhost:3001/api/documents/${id}/history`, {
             method: "POST",
             headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
             body: JSON.stringify({ reason })
         });
-        alert("Version saved!");
+        await alertUser("Version saved!");
         if (showHistory) fetchHistory();
     };
 
     const inviteUser = async () => {
-        const email = prompt("Enter the email address of the user to invite:");
+        const email = await promptUser("Enter the email address of the user to invite:");
         if (!email) return;
 
         const res = await fetch(`http://localhost:3001/api/documents/${id}/invite`, {
@@ -189,9 +199,9 @@ export default function EditorPage() {
 
         const data = await res.json();
         if (res.ok) {
-            alert(data.message);
+            await alertUser(data.message);
         } else {
-            alert(data.error || "Failed to invite user");
+            await alertUser(data.error || "Failed to invite user");
         }
     };
 
@@ -236,7 +246,7 @@ export default function EditorPage() {
             {/* Main Sidebar (File Tree / History) */}
             <div className="w-64 bg-[#111622] border-r border-[#1e293b] flex flex-col shadow-2xl relative z-20">
                 {fileMap ? (
-                    <FileTree fileMap={fileMap} activeFileId={activeFileId} onSelectFile={setActiveFileId} ydoc={ydocState} />
+                    <FileTree fileMap={fileMap} activeFileId={activeFileId} onSelectFile={setActiveFileId} ydoc={ydocState} promptUser={promptUser} />
                 ) : (
                     <div className="p-4 text-xs text-slate-500">Connecting to File System...</div>
                 )}
@@ -285,6 +295,44 @@ export default function EditorPage() {
                     </div>
                 </div>
             </div>
+
+            {promptConfig && (
+                <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center backdrop-blur-sm">
+                    <div className="bg-[#1e293b] p-6 rounded-lg shadow-2xl border border-slate-700 w-96">
+                        <h3 className="text-lg font-medium text-white mb-4">{promptConfig.message}</h3>
+                        {!promptConfig.isAlert && (
+                            <input
+                                autoFocus
+                                className="w-full bg-[#0d121c] border border-slate-600 rounded px-3 py-2 text-white outline-none focus:border-blue-500 transition-colors"
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                        promptConfig.resolve(e.currentTarget.value);
+                                        setPromptConfig(null);
+                                    }
+                                    if (e.key === 'Escape') {
+                                        promptConfig.resolve(null);
+                                        setPromptConfig(null);
+                                    }
+                                }}
+                            />
+                        )}
+                        <div className="flex justify-end gap-2 mt-6">
+                            {!promptConfig.isAlert && (
+                                <button onClick={() => { promptConfig.resolve(null); setPromptConfig(null); }} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
+                            )}
+                            <button onClick={(e) => {
+                                if (promptConfig.isAlert) {
+                                    promptConfig.resolve(null);
+                                } else {
+                                    const input = e.currentTarget.parentElement?.previousElementSibling as HTMLInputElement;
+                                    promptConfig.resolve(input.value);
+                                }
+                                setPromptConfig(null);
+                            }} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors">{promptConfig.isAlert ? "OK" : "Submit"}</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

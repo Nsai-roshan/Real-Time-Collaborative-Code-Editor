@@ -14,9 +14,10 @@ interface FileTreeProps {
     activeFileId: string | null;
     onSelectFile: (id: string) => void;
     ydoc: Y.Doc;
+    promptUser: (msg: string) => Promise<string | null>;
 }
 
-export function FileTree({ fileMap, activeFileId, onSelectFile, ydoc }: FileTreeProps) {
+export function FileTree({ fileMap, activeFileId, onSelectFile, ydoc, promptUser }: FileTreeProps) {
     const [nodes, setNodes] = useState<FileNode[]>([]);
     const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(["root"]));
 
@@ -47,8 +48,8 @@ export function FileTree({ fileMap, activeFileId, onSelectFile, ydoc }: FileTree
         setExpandedFolders(newSet);
     };
 
-    const createNode = (type: "file" | "folder", parentId: string | null = null) => {
-        const name = prompt(`Enter ${type} name:`);
+    const createNode = async (type: "file" | "folder", parentId: string | null = null) => {
+        const name = await promptUser(`Enter ${type} name:`);
         if (!name) return;
 
         const id = Math.random().toString(36).substr(2, 9);
